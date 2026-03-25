@@ -29,3 +29,7 @@ export interface AppConfig {
   textChunkLimit: number;
   logLevel: string;
 }
+
+export function buildConversationKey(accountId: string, userId: string): string {
+  return `${accountId}:${userId}`;
+}

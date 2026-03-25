@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { logger } from "../util/logger.js";
+import { buildConversationKey } from "../types.js";
 
 const contextTokenStore = new Map<string, string>();
 let contextTokenFilePath: string | null = null;
@@ -45,15 +46,17 @@ export function initContextTokenStore(stateDir: string): void {
   }
 }
 
-export function setContextToken(userId: string, token: string): void {
-  logger.debug(`setContextToken: userId=${userId}`);
-  contextTokenStore.set(userId, token);
+export function setContextToken(accountId: string, userId: string, token: string): void {
+  const key = buildConversationKey(accountId, userId);
+  logger.debug(`setContextToken: accountId=${accountId} userId=${userId}`);
+  contextTokenStore.set(key, token);
   persistContextTokens();
 }
 
-export function getContextToken(userId: string): string | undefined {
-  const val = contextTokenStore.get(userId);
-  logger.debug(`getContextToken: userId=${userId} found=${val !== undefined}`);
+export function getContextToken(accountId: string, userId: string): string | undefined {
+  const key = buildConversationKey(accountId, userId);
+  const val = contextTokenStore.get(key);
+  logger.debug(`getContextToken: accountId=${accountId} userId=${userId} found=${val !== undefined}`);
   return val;
 }
 
@@ -69,4 +72,13 @@ export function clearContextTokens(): void {
   } catch (err) {
     logger.warn(`clearContextTokens: failed to remove ${contextTokenFilePath}: ${String(err)}`);
   }
+}
+
+export function clearContextTokensForAccount(accountId: string): void {
+  for (const key of [...contextTokenStore.keys()]) {
+    if (key.startsWith(`${accountId}:`)) {
+      contextTokenStore.delete(key);
+    }
+  }
+  persistContextTokens();
 }

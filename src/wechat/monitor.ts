@@ -15,11 +15,16 @@ const BACKOFF_DELAY_MS = 30_000;
 const RETRY_DELAY_MS = 2_000;
 
 export type MessageHandler = (
-  msg: WeixinMessage,
-  typingTicket: string,
+  params: {
+    accountId: string;
+    apiOpts: WeixinApiOptions;
+    msg: WeixinMessage;
+    typingTicket: string;
+  },
 ) => void | Promise<void>;
 
 export interface MonitorOptions {
+  accountId: string;
   apiOpts: WeixinApiOptions;
   getUpdatesBuf: string;
   onBufUpdate: (buf: string) => void;
@@ -30,7 +35,7 @@ export interface MonitorOptions {
 export async function startMonitor(opts: MonitorOptions): Promise<void> {
   const { apiOpts, onMessage, abortSignal } = opts;
 
-  logger.info(`Monitor started: baseUrl=${apiOpts.baseUrl}`);
+  logger.info(`Monitor started: accountId=${opts.accountId} baseUrl=${apiOpts.baseUrl}`);
 
   let getUpdatesBuf = opts.getUpdatesBuf;
 
@@ -106,7 +111,7 @@ export async function startMonitor(opts: MonitorOptions): Promise<void> {
       const list = resp.msgs ?? [];
       for (const msg of list) {
         logger.info(
-          `inbound message: from=${msg.from_user_id} types=${msg.item_list?.map((i) => i.type).join(",") ?? "none"}`,
+          `inbound message: accountId=${opts.accountId} from=${msg.from_user_id} types=${msg.item_list?.map((i) => i.type).join(",") ?? "none"}`,
         );
 
         const fromUserId = msg.from_user_id ?? "";
@@ -116,9 +121,14 @@ export async function startMonitor(opts: MonitorOptions): Promise<void> {
         );
 
         try {
-          await onMessage(msg, cachedConfig.typingTicket);
+          await onMessage({
+            accountId: opts.accountId,
+            apiOpts,
+            msg,
+            typingTicket: cachedConfig.typingTicket,
+          });
         } catch (err) {
-          logger.error(`Message handler error: from=${fromUserId} err=${String(err)}`);
+          logger.error(`Message handler error: accountId=${opts.accountId} from=${fromUserId} err=${String(err)}`);
         }
       }
     } catch (err) {
@@ -141,7 +151,7 @@ export async function startMonitor(opts: MonitorOptions): Promise<void> {
       }
     }
   }
-  logger.info(`Monitor ended`);
+  logger.info(`Monitor ended: accountId=${opts.accountId}`);
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

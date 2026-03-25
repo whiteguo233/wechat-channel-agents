@@ -30,24 +30,35 @@ describe("context-token persistence", () => {
     tempDir = makeTempDir();
 
     initContextTokenStore(tempDir);
-    setContextToken("user-a", "token-a");
-    setContextToken("user-b", "token-b");
+    setContextToken("account-1", "user-a", "token-a");
+    setContextToken("account-2", "user-a", "token-b");
 
     initContextTokenStore(tempDir);
 
-    expect(getContextToken("user-a")).toBe("token-a");
-    expect(getContextToken("user-b")).toBe("token-b");
+    expect(getContextToken("account-1", "user-a")).toBe("token-a");
+    expect(getContextToken("account-2", "user-a")).toBe("token-b");
   });
 
   it("clears persisted tokens on logout cleanup", () => {
     tempDir = makeTempDir();
 
     initContextTokenStore(tempDir);
-    setContextToken("user-a", "token-a");
+    setContextToken("account-1", "user-a", "token-a");
     clearContextTokens();
 
     initContextTokenStore(tempDir);
 
-    expect(getContextToken("user-a")).toBeUndefined();
+    expect(getContextToken("account-1", "user-a")).toBeUndefined();
+  });
+
+  it("keeps tokens isolated between accounts", () => {
+    tempDir = makeTempDir();
+
+    initContextTokenStore(tempDir);
+    setContextToken("account-1", "user-a", "token-a");
+    setContextToken("account-2", "user-a", "token-b");
+
+    expect(getContextToken("account-1", "user-a")).toBe("token-a");
+    expect(getContextToken("account-2", "user-a")).toBe("token-b");
   });
 });

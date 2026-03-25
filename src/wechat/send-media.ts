@@ -52,12 +52,13 @@ function buildVideoItem(upload: UploadedFileInfo): MessageItem {
 
 async function sendMediaItem(
   apiOpts: WeixinApiOptions,
+  accountId: string,
   toUserId: string,
   item: MessageItem,
 ): Promise<void> {
-  const contextToken = getContextToken(toUserId);
+  const contextToken = getContextToken(accountId, toUserId);
   if (!contextToken) {
-    logger.error(`Cannot send media: no contextToken for user=${toUserId}`);
+    logger.error(`Cannot send media: no contextToken for accountId=${accountId} user=${toUserId}`);
     return;
   }
 
@@ -78,28 +79,31 @@ async function sendMediaItem(
 
 export async function sendImage(
   apiOpts: WeixinApiOptions,
+  accountId: string,
   toUserId: string,
   imageData: Buffer,
 ): Promise<void> {
   const upload = await uploadFile(apiOpts, toUserId, imageData, UploadMediaType.IMAGE);
-  await sendMediaItem(apiOpts, toUserId, buildImageItem(upload));
+  await sendMediaItem(apiOpts, accountId, toUserId, buildImageItem(upload));
 }
 
 export async function sendFile(
   apiOpts: WeixinApiOptions,
+  accountId: string,
   toUserId: string,
   fileData: Buffer,
   fileName: string,
 ): Promise<void> {
   const upload = await uploadFile(apiOpts, toUserId, fileData, UploadMediaType.FILE);
-  await sendMediaItem(apiOpts, toUserId, buildFileItem(upload, fileName));
+  await sendMediaItem(apiOpts, accountId, toUserId, buildFileItem(upload, fileName));
 }
 
 export async function sendVideo(
   apiOpts: WeixinApiOptions,
+  accountId: string,
   toUserId: string,
   videoData: Buffer,
 ): Promise<void> {
   const upload = await uploadFile(apiOpts, toUserId, videoData, UploadMediaType.VIDEO);
-  await sendMediaItem(apiOpts, toUserId, buildVideoItem(upload));
+  await sendMediaItem(apiOpts, accountId, toUserId, buildVideoItem(upload));
 }

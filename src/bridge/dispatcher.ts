@@ -12,29 +12,38 @@ import { formatResponse } from "./formatter.js";
 import { chunkText } from "./chunker.js";
 import { logger } from "../util/logger.js";
 import { redactUserId } from "../util/redact.js";
-import type { AgentType, AppConfig } from "../types.js";
+import { buildConversationKey, type AgentType, type AppConfig } from "../types.js";
 
 const TYPING_INTERVAL_MS = 10_000;
 
 export interface DispatcherDeps {
-  apiOpts: WeixinApiOptions;
   config: AppConfig;
   onLogout?: () => Promise<void>;
+  onLogin?: () => Promise<{ accountId: string }>;
+  listAccounts?: () => string[];
 }
 
 export function createDispatcher(deps: DispatcherDeps) {
-  const { apiOpts, config } = deps;
+  const { config } = deps;
 
-  return async function dispatch(msg: WeixinMessage, typingTicket: string): Promise<void> {
+  return async function dispatch(params: {
+    accountId: string;
+    apiOpts: WeixinApiOptions;
+    msg: WeixinMessage;
+    typingTicket: string;
+  }): Promise<void> {
+    const { accountId, apiOpts, msg, typingTicket } = params;
+
     // Only process USER messages
     if (msg.message_type !== MessageType.USER) return;
 
     const userId = msg.from_user_id;
     if (!userId) return;
+    const conversationKey = buildConversationKey(accountId, userId);
 
     // Cache context_token
     if (msg.context_token) {
-      setContextToken(userId, msg.context_token);
+      setContextToken(accountId, userId, msg.context_token);
     }
 
     // Extract text
@@ -55,40 +64,43 @@ export function createDispatcher(deps: DispatcherDeps) {
 
     switch (firstWord) {
       case "/claude":
-        await handleSwitch(userId, "claude");
+        await handleSwitch(accountId, apiOpts, userId, conversationKey, "claude");
         return;
       case "/codex":
-        await handleSwitch(userId, "codex");
+        await handleSwitch(accountId, apiOpts, userId, conversationKey, "codex");
         return;
       case "/reset":
-        await handleReset(userId);
+        await handleReset(accountId, apiOpts, userId, conversationKey);
         return;
       case "/status":
-        await handleStatus(userId);
+        await handleStatus(accountId, apiOpts, userId, conversationKey);
         return;
       case "/help":
-        await handleHelp(userId);
+        await handleHelp(accountId, apiOpts, userId);
         return;
       case "/cwd":
-        await handleCwd(userId, trimmed.slice(4).trim());
+        await handleCwd(accountId, apiOpts, userId, conversationKey, trimmed.slice(4).trim());
+        return;
+      case "/login":
+        await handleLogin(accountId, apiOpts, userId);
         return;
       case "/logout":
-        await handleLogout(userId);
+        await handleLogout(accountId, apiOpts, userId);
         return;
     }
 
     // Route to agent
-    const session = getOrCreateSession(userId, config.defaultAgent, config.codex.workingDirectory);
-    const agentType = ensureSessionAgentAvailable(userId, session);
+    const session = getOrCreateSession(conversationKey, config.defaultAgent, config.codex.workingDirectory);
+    const agentType = ensureSessionAgentAvailable(conversationKey, userId, session);
 
     // Start typing indicator
     const typingController = new AbortController();
-    startTypingLoop(userId, typingTicket, typingController.signal);
+    startTypingLoop(apiOpts, userId, typingTicket, typingController.signal);
 
     try {
       const agent = getAgent(agentType);
       const result = await agent.run({
-        userId,
+        userId: conversationKey,
         prompt: trimmed,
         cwd: session.cwd,
       });
@@ -99,58 +111,84 @@ export function createDispatcher(deps: DispatcherDeps) {
       const plainText = markdownToPlainText(response);
       const chunks = chunkText(plainText, config.textChunkLimit);
 
-      await sendChunks(userId, chunks);
+      await sendChunks(accountId, apiOpts, userId, chunks);
     } catch (err) {
       typingController.abort();
       logger.error(`Agent error for user=${redactUserId(userId)}: ${String(err)}`);
-      await sendReply(userId, `Error: ${String(err)}`);
+      await sendReply(accountId, apiOpts, userId, `Error: ${String(err)}`);
     }
   };
 
-  async function handleSwitch(userId: string, agentType: AgentType): Promise<void> {
+  async function handleSwitch(
+    accountId: string,
+    apiOpts: WeixinApiOptions,
+    userId: string,
+    conversationKey: string,
+    agentType: AgentType,
+  ): Promise<void> {
     const types = getRegisteredTypes();
     if (!types.includes(agentType)) {
-      await sendReply(userId, `Agent "${agentType}" is not available. Available: ${types.join(", ")}`);
+      await sendReply(accountId, apiOpts, userId, `Agent "${agentType}" is not available. Available: ${types.join(", ")}`);
       return;
     }
-    const session = getOrCreateSession(userId, config.defaultAgent, config.codex.workingDirectory);
-    const currentAgentType = ensureSessionAgentAvailable(userId, session);
+    const session = getOrCreateSession(conversationKey, config.defaultAgent, config.codex.workingDirectory);
+    const currentAgentType = ensureSessionAgentAvailable(conversationKey, userId, session);
     if (currentAgentType === agentType) {
-      await sendReply(userId, `Already using ${agentType}.`);
+      await sendReply(accountId, apiOpts, userId, `Already using ${agentType}.`);
       return;
     }
-    updateSession(userId, { agentType });
-    await sendReply(userId, `Switched to ${agentType}. Previous ${currentAgentType} session is preserved.`);
+    updateSession(conversationKey, { agentType });
+    await sendReply(
+      accountId,
+      apiOpts,
+      userId,
+      `Switched to ${agentType}. Previous ${currentAgentType} session is preserved.`,
+    );
   }
 
-  async function handleReset(userId: string): Promise<void> {
-    const session = getOrCreateSession(userId, config.defaultAgent, config.codex.workingDirectory);
-    const agentType = ensureSessionAgentAvailable(userId, session);
+  async function handleReset(
+    accountId: string,
+    apiOpts: WeixinApiOptions,
+    userId: string,
+    conversationKey: string,
+  ): Promise<void> {
+    const session = getOrCreateSession(conversationKey, config.defaultAgent, config.codex.workingDirectory);
+    const agentType = ensureSessionAgentAvailable(conversationKey, userId, session);
     const agent = getAgent(agentType);
-    agent.resetSession(userId);
-    resetAgentSession(userId, agentType);
-    await sendReply(userId, `${agentType} session reset. Starting fresh.`);
+    agent.resetSession(conversationKey);
+    resetAgentSession(conversationKey, agentType);
+    await sendReply(accountId, apiOpts, userId, `${agentType} session reset. Starting fresh.`);
   }
 
-  async function handleStatus(userId: string): Promise<void> {
-    const session = getOrCreateSession(userId, config.defaultAgent, config.codex.workingDirectory);
-    const agentType = ensureSessionAgentAvailable(userId, session);
+  async function handleStatus(
+    accountId: string,
+    apiOpts: WeixinApiOptions,
+    userId: string,
+    conversationKey: string,
+  ): Promise<void> {
+    const session = getOrCreateSession(conversationKey, config.defaultAgent, config.codex.workingDirectory);
+    const agentType = ensureSessionAgentAvailable(conversationKey, userId, session);
     const agent = getAgent(agentType);
-    const agentStatus = agent.getStatus(userId);
+    const agentStatus = agent.getStatus(conversationKey);
     const lines = [
+      `Current bot account: ${accountId}`,
+      `Connected bot accounts: ${deps.listAccounts?.().join(", ") ?? accountId}`,
       `Current agent: ${agentType}`,
       `CWD: ${session.cwd}`,
       `Last active: ${new Date(session.lastActive).toISOString()}`,
       agentStatus,
     ];
-    await sendReply(userId, lines.join("\n"));
+    await sendReply(accountId, apiOpts, userId, lines.join("\n"));
   }
 
-  async function handleHelp(userId: string): Promise<void> {
+  async function handleHelp(accountId: string, apiOpts: WeixinApiOptions, userId: string): Promise<void> {
     const types = getRegisteredTypes();
+    const loginHelp = hasAdminUsers()
+      ? "  /login - Add another bot account by QR login (admin only)"
+      : "  /login - Add another bot account by QR login (disabled until adminUsers is configured)";
     const logoutHelp = hasAdminUsers()
-      ? "  /logout - Log out bot and stop service (admin only)"
-      : "  /logout - Log out bot and stop service (disabled until adminUsers is configured)";
+      ? "  /logout - Log out all bot accounts and stop service (admin only)"
+      : "  /logout - Log out all bot accounts and stop service (disabled until adminUsers is configured)";
     const lines = [
       "Commands:",
       ...types.map((t) => `  /${t} - Switch to ${t}`),
@@ -158,57 +196,120 @@ export function createDispatcher(deps: DispatcherDeps) {
       "  /status - Show current status",
       "  /help - Show this help",
       "  /cwd <path> - Change working directory",
+      loginHelp,
       logoutHelp,
       "",
       `Available agents: ${types.join(", ")}`,
+      `Current bot account: ${accountId}`,
       "Send any text to chat with the current agent.",
     ];
-    await sendReply(userId, lines.join("\n"));
+    await sendReply(accountId, apiOpts, userId, lines.join("\n"));
   }
 
-  async function handleCwd(userId: string, newCwd: string): Promise<void> {
-    const session = getOrCreateSession(userId, config.defaultAgent, config.codex.workingDirectory);
+  async function handleCwd(
+    accountId: string,
+    apiOpts: WeixinApiOptions,
+    userId: string,
+    conversationKey: string,
+    newCwd: string,
+  ): Promise<void> {
+    const session = getOrCreateSession(conversationKey, config.defaultAgent, config.codex.workingDirectory);
     if (!newCwd) {
-      await sendReply(userId, `Current CWD: ${session.cwd}`);
+      await sendReply(accountId, apiOpts, userId, `Current CWD: ${session.cwd}`);
     } else {
-      updateSession(userId, { cwd: newCwd });
-      await sendReply(userId, `Working directory changed to: ${newCwd}`);
+      updateSession(conversationKey, { cwd: newCwd });
+      await sendReply(accountId, apiOpts, userId, `Working directory changed to: ${newCwd}`);
     }
   }
 
-  async function handleLogout(userId: string): Promise<void> {
+  async function handleLogin(accountId: string, apiOpts: WeixinApiOptions, userId: string): Promise<void> {
+    if (!hasAdminUsers()) {
+      logger.warn(`Login command denied for user=${redactUserId(userId)}: no admin users configured`);
+      await sendReply(accountId, apiOpts, userId, "Command /login is disabled until adminUsers is configured.");
+      return;
+    }
+
+    if (!isUserAdmin(userId)) {
+      logger.warn(`Login command denied for non-admin user=${redactUserId(userId)}`);
+      await sendReply(accountId, apiOpts, userId, "Command /login is restricted to admin users.");
+      return;
+    }
+
+    if (!deps.onLogin) {
+      await sendReply(accountId, apiOpts, userId, "Account login is not available in this runtime.");
+      return;
+    }
+
+    await sendReply(
+      accountId,
+      apiOpts,
+      userId,
+      "Starting QR login for an additional bot account. Check the terminal to scan the QR code.",
+    );
+
+    try {
+      const result = await deps.onLogin();
+      await sendReply(
+        accountId,
+        apiOpts,
+        userId,
+        `Additional bot account connected: ${result.accountId}`,
+      );
+    } catch (err) {
+      await sendReply(
+        accountId,
+        apiOpts,
+        userId,
+        `Failed to add bot account: ${String(err)}`,
+      );
+    }
+  }
+
+  async function handleLogout(accountId: string, apiOpts: WeixinApiOptions, userId: string): Promise<void> {
     if (!hasAdminUsers()) {
       logger.warn(`Logout command denied for user=${redactUserId(userId)}: no admin users configured`);
-      await sendReply(userId, "Command /logout is disabled until adminUsers is configured.");
+      await sendReply(accountId, apiOpts, userId, "Command /logout is disabled until adminUsers is configured.");
       return;
     }
 
     if (!isUserAdmin(userId)) {
       logger.warn(`Logout command denied for non-admin user=${redactUserId(userId)}`);
-      await sendReply(userId, "Command /logout is restricted to admin users.");
+      await sendReply(accountId, apiOpts, userId, "Command /logout is restricted to admin users.");
       return;
     }
 
     await sendReply(
+      accountId,
+      apiOpts,
       userId,
-      "Logging out bot. Local credentials will be cleared and the service will stop. Restart npm run dev to scan a new QR code.",
+      "Logging out all bot accounts. Local credentials will be cleared and the service will stop. Restart npm run dev or use /login after restart to scan a new QR code.",
     );
 
     await deps.onLogout?.();
   }
 
-  async function sendReply(userId: string, text: string): Promise<void> {
-    const contextToken = getContextToken(userId);
+  async function sendReply(
+    accountId: string,
+    apiOpts: WeixinApiOptions,
+    userId: string,
+    text: string,
+  ): Promise<void> {
+    const contextToken = getContextToken(accountId, userId);
     if (!contextToken) {
-      logger.error(`No contextToken for user=${redactUserId(userId)}, cannot send reply`);
+      logger.error(`No contextToken for accountId=${accountId} user=${redactUserId(userId)}, cannot send reply`);
       return;
     }
     const chunks = chunkText(text, config.textChunkLimit);
-    await sendChunks(userId, chunks);
+    await sendChunks(accountId, apiOpts, userId, chunks);
   }
 
-  async function sendChunks(userId: string, chunks: string[]): Promise<void> {
-    const contextToken = getContextToken(userId);
+  async function sendChunks(
+    accountId: string,
+    apiOpts: WeixinApiOptions,
+    userId: string,
+    chunks: string[],
+  ): Promise<void> {
+    const contextToken = getContextToken(accountId, userId);
     for (const chunk of chunks) {
       try {
         await sendTextMessage({
@@ -217,7 +318,7 @@ export function createDispatcher(deps: DispatcherDeps) {
           opts: { ...apiOpts, contextToken },
         });
       } catch (err) {
-        logger.error(`Failed to send chunk to=${redactUserId(userId)}: ${String(err)}`);
+        logger.error(`Failed to send chunk accountId=${accountId} to=${redactUserId(userId)}: ${String(err)}`);
       }
       if (chunks.length > 1) {
         await new Promise((r) => setTimeout(r, 200));
@@ -225,7 +326,12 @@ export function createDispatcher(deps: DispatcherDeps) {
     }
   }
 
-  function startTypingLoop(userId: string, ticket: string, signal: AbortSignal): void {
+  function startTypingLoop(
+    apiOpts: WeixinApiOptions,
+    userId: string,
+    ticket: string,
+    signal: AbortSignal,
+  ): void {
     const sendTypingOnce = async () => {
       try {
         await sendTyping({
@@ -257,6 +363,7 @@ export function createDispatcher(deps: DispatcherDeps) {
   }
 
   function ensureSessionAgentAvailable(
+    conversationKey: string,
     userId: string,
     session: { agentType: AgentType },
   ): AgentType {
@@ -270,7 +377,7 @@ export function createDispatcher(deps: DispatcherDeps) {
       logger.warn(
         `Session agent ${session.agentType} unavailable for user=${redactUserId(userId)}; falling back to ${resolvedAgentType}`,
       );
-      updateSession(userId, { agentType: resolvedAgentType });
+      updateSession(conversationKey, { agentType: resolvedAgentType });
     }
 
     return resolvedAgentType;

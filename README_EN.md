@@ -1,6 +1,6 @@
 # WeChat Channel Agents
 
-A WeChat bot bridge that supports both **Claude Code** and **Codex** AI agents in a single bot, with real-time switching between them.
+A WeChat bot bridge that supports one or more WeChat bot accounts, with both **Claude Code** and **Codex** AI agents available in each bot and real-time switching between them.
 
 <p align="center">
   <img src="docs/demo.png" width="320" alt="Demo screenshot" />
@@ -9,8 +9,9 @@ A WeChat bot bridge that supports both **Claude Code** and **Codex** AI agents i
 ## Features
 
 - **Dual Agent Support** — Connect Claude Code (Anthropic) and Codex (OpenAI) through one WeChat bot
+- **Multi-Account Support** — Run multiple WeChat bot accounts at the same time and reply through the account that received the message
 - **Live Switching** — Send `/claude` or `/codex` to switch agents instantly; the other agent's session is preserved
-- **Session Persistence** — Per-user dual-agent sessions survive restarts
+- **Session Persistence** — Dual-agent sessions are isolated per `bot account + WeChat user` and survive restarts
 - **Security** — Built-in dangerous command blocking (rm -rf, sudo, etc.) and user allowlist
 - **Media Support** — Upload/download images, files, and videos via CDN with AES encryption
 - **Auto Chunking** — Long responses are automatically split into 4000-character chunks
@@ -76,6 +77,8 @@ npm run dev
 
 A QR code will appear in the terminal. Scan it with WeChat to log in. Once connected, you can chat with the bot.
 
+To add more bot accounts while the service is running, use the admin command `/login`. A new QR code will be printed in the terminal and the extra account will be attached to the same service.
+
 ## Commands
 
 | Command | Description |
@@ -86,11 +89,13 @@ A QR code will appear in the terminal. Scan it with WeChat to log in. Once conne
 | `/status` | Show current agent type and session info |
 | `/help` | List all available commands |
 | `/cwd <path>` | Change working directory |
-| `/logout` | Admin-only logout, clear local credentials, and stop the service |
+| `/login` | Admin-only command to add another bot account via QR login |
+| `/logout` | Admin-only logout for all bot accounts, clear local credentials, and stop the service |
 | Plain text | Send to current agent for processing |
 
 The default agent is Claude Code. When you switch agents, the other agent's session is preserved — you can switch back and continue where you left off.
-`/logout` is only enabled for users listed in `adminUsers`. `adminUsers` must be configured separately — it does not inherit from `allowedUsers`. If `adminUsers` is empty, the command is disabled.
+In multi-account mode, each `bot account + WeChat user` pair keeps its own agent session and `contextToken`, so replies do not bleed across bot accounts.
+`/login` and `/logout` are only enabled for users listed in `adminUsers`. `adminUsers` must be configured separately — it does not inherit from `allowedUsers`. If `adminUsers` is empty, both commands are disabled.
 Codex defaults to `danger-full-access` to avoid `bwrap` compatibility failures on some Linux hosts; override `codex.sandboxMode` if you want a stricter sandbox.
 
 ## Project Structure
@@ -120,7 +125,7 @@ src/
   auth/allowlist.ts         # User allowlist
   cdn/                      # CDN encryption/decryption
   media/                    # Media download
-  storage/                  # Persistent storage
+  storage/                  # Persistent storage (multi-account credentials, syncBuf, sessions)
   util/                     # Logger, random, redaction
 ```
 
@@ -128,13 +133,14 @@ src/
 
 ```
 User sends WeChat message
-  → monitor: long-poll for messages
+  → account monitor: one long-poll loop per bot account
   → dispatcher: parse commands / route to agent
     → /claude, /codex: switch agent
+    → /login: admin adds another bot account
     → plain text: agent.run() → format → chunk → send
 ```
 
-Core design: **Agent abstraction + Strategy pattern**. The `AgentBackend` interface unifies Claude and Codex calls. The Dispatcher routes messages based on the user's current agent selection. Each user's session stores both `claudeSessionId` and `codexThreadId`, so switching agents doesn't lose conversation state.
+Core design: **Agent abstraction + Strategy pattern**. The `AgentBackend` interface unifies Claude and Codex calls. The Dispatcher routes messages based on the user's current agent selection. Each `bot account + WeChat user` session stores both `claudeSessionId` and `codexThreadId`, so switching agents doesn't lose conversation state and multi-account traffic stays isolated.
 
 ## Development
 
