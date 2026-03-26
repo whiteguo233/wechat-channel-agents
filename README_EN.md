@@ -150,6 +150,13 @@ npm test            # Run tests
 npm run build       # Compile
 ```
 
+### Testing
+
+The project uses [Vitest](https://vitest.dev/) with both unit tests and end-to-end tests:
+
+- **Unit tests** — Cover core modules: allowlist, agent resolution, text chunking, state persistence, log redaction, and context token storage
+- **End-to-end tests** — Cover the full message handling pipeline: message receipt → command parsing / agent routing → response formatting → message sending, including auth control, command handling, session management, error handling, and multi-user isolation
+
 ## License
 
 MIT
