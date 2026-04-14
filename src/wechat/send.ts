@@ -2,6 +2,7 @@ import { sendMessage as sendMessageApi } from "./api.js";
 import type { WeixinApiOptions } from "./api.js";
 import { logger } from "../util/logger.js";
 import { generateId } from "../util/random.js";
+import { redactUserId } from "../util/redact.js";
 import type { MessageItem, SendMessageReq } from "./types.js";
 import { MessageItemType, MessageState, MessageType } from "./types.js";
 
@@ -77,8 +78,11 @@ export async function sendTextMessage(params: {
       routeTag: opts.routeTag,
       body: req,
     });
+    logger.info(
+      `sendTextMessage: sent to=${redactUserId(to)} clientId=${clientId} len=${text.length}`,
+    );
   } catch (err) {
-    logger.error(`sendTextMessage: failed to=${to} clientId=${clientId} err=${String(err)}`);
+    logger.error(`sendTextMessage: failed to=${redactUserId(to)} clientId=${clientId} err=${String(err)}`);
     throw err;
   }
   return { messageId: clientId };

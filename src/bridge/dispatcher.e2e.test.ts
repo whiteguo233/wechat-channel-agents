@@ -9,11 +9,17 @@ import type { WeixinApiOptions } from "../wechat/api.js";
 import type { AgentBackend, AgentResponse } from "../agent/interface.js";
 import type { AgentType } from "../types.js";
 
+const getClaudeUsageReportMock = vi.fn();
+
 // ---- Mock WeChat API ----
 vi.mock("../wechat/api.js", () => ({
   sendMessage: vi.fn().mockResolvedValue(undefined),
   sendTyping: vi.fn().mockResolvedValue(undefined),
   getConfig: vi.fn().mockResolvedValue({ typing_ticket: "ticket" }),
+}));
+
+vi.mock("../util/ccusage.js", () => ({
+  getClaudeUsageReport: getClaudeUsageReportMock,
 }));
 
 // ---- Mock logger to suppress output ----
@@ -103,6 +109,7 @@ describe("dispatcher e2e", () => {
     initContextTokenStore = contextTokenMod.initContextTokenStore;
     sendMessageMock = apiMod.sendMessage as ReturnType<typeof vi.fn>;
     sendMessageMock.mockClear();
+    getClaudeUsageReportMock.mockReset();
 
     // Setup
     initSessions(tmpDir);
@@ -123,6 +130,7 @@ describe("dispatcher e2e", () => {
       wechat: { baseUrl: "https://api.test", routeTag: "tag", botType: "test" },
       anthropicBaseUrl: "https://anthropic.test",
       anthropicAuthToken: "sk-test",
+      agent: { runTimeoutMs: 600_000 },
       codex: { workingDirectory: "/tmp" },
       stateDir: tmpDir,
       allowedUsers: [],
@@ -386,6 +394,66 @@ describe("dispatcher e2e", () => {
     expect(helpText).toContain("/status");
     expect(helpText).toContain("/help");
     expect(helpText).toContain("/cwd");
+    expect(helpText).toContain("/ccusage");
+  });
+
+  it("/ccusage returns the local Claude usage report", async () => {
+    getClaudeUsageReportMock.mockResolvedValue("Claude usage report");
+
+    const mockClaude = createMockAgent("claude");
+    registerAgent(mockClaude);
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    setContextToken(accountId, userId, "ctx");
+
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "/ccusage"), typingTicket });
+
+    expect(getClaudeUsageReportMock).toHaveBeenCalledTimes(1);
+    const texts = getSentTexts();
+    expect(texts.some((t) => t.includes("Claude usage report"))).toBe(true);
+  });
+
+  it("/compact is listed in help", async () => {
+    const mockClaude = createMockAgent("claude");
+    registerAgent(mockClaude);
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    setContextToken(accountId, userId, "ctx");
+
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "/help"), typingTicket });
+
+    const texts = getSentTexts();
+    expect(texts.join("\n")).toContain("/compact");
+  });
+
+  it("/compact forwards the built-in slash command to the current agent", async () => {
+    const mockClaude = createMockAgent("claude", { text: "Compacted summary" });
+    registerAgent(mockClaude);
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    setContextToken(accountId, userId, "ctx");
+
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "/compact"), typingTicket });
+
+    expect(mockClaude.run).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: "/compact" }),
+    );
+
+    const texts = getSentTexts();
+    expect(texts.some((t) => t.includes("Compacted summary"))).toBe(true);
+  });
+
+  it("/compact sends a confirmation when the agent returns no visible output", async () => {
+    const mockClaude = createMockAgent("claude", { text: "(No response)" });
+    registerAgent(mockClaude);
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    setContextToken(accountId, userId, "ctx");
+
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "/compact"), typingTicket });
+
+    const texts = getSentTexts();
+    expect(texts).toContain("Current claude session compacted.");
   });
 
   it("/cwd without args shows current directory", async () => {
@@ -431,6 +499,59 @@ describe("dispatcher e2e", () => {
     const texts = getSentTexts();
     expect(texts.some((t) => t.includes("Error:"))).toBe(true);
     expect(texts.some((t) => t.includes("agent crashed"))).toBe(true);
+  });
+
+  it("times out a stuck agent run, flushes partial output, and ignores late deltas", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveRun: ((value: AgentResponse) => void) | undefined;
+      let onTextDelta: ((text: string) => Promise<void> | void) | undefined;
+
+      const mockClaude: AgentBackend = {
+        type: "claude",
+        run: vi.fn(async (req) => {
+          onTextDelta = req.onTextDelta;
+          await req.onTextDelta?.("partial");
+          return await new Promise<AgentResponse>((resolve) => {
+            resolveRun = resolve;
+          });
+        }),
+        resetSession: vi.fn(),
+        getStatus: vi.fn().mockReturnValue("claude is idle"),
+      };
+      registerAgent(mockClaude);
+
+      const dispatch = createDispatcher({
+        config: makeConfig({ agent: { runTimeoutMs: 50 } }),
+      });
+      setContextToken(accountId, userId, "ctx");
+
+      const dispatchPromise = dispatch({
+        accountId,
+        apiOpts,
+        msg: makeTextMessage(userId, "hang please"),
+        typingTicket,
+      });
+
+      await vi.advanceTimersByTimeAsync(51);
+      await dispatchPromise;
+
+      expect(getSentTexts()).toEqual([
+        "partial",
+        "Error: Agent run timed out after 50ms.",
+      ]);
+
+      await onTextDelta?.("late chunk");
+      resolveRun?.({ text: "late final", isError: false, toolsUsed: [] });
+      await vi.runAllTimersAsync();
+
+      expect(getSentTexts()).toEqual([
+        "partial",
+        "Error: Agent run timed out after 50ms.",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("agent response with tools used appends tool summary", async () => {

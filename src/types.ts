@@ -19,6 +19,9 @@ export interface UserSession {
 
 export interface AppConfig {
   defaultAgent: AgentType;
+  agent: {
+    runTimeoutMs: number;
+  };
   wechat: {
     baseUrl: string;
     routeTag?: string | null;

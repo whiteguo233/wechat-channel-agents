@@ -89,6 +89,8 @@ npm run dev
 | `/status` | 查看当前 agent 类型和会话信息 |
 | `/help` | 显示所有可用命令 |
 | `/cwd <path>` | 修改工作目录 |
+| `/compact` | 调用当前 agent 的内置 compact 命令压缩会话上下文 |
+| `/ccusage` | 查看本机 Claude Code 使用量日报 |
 | `/login` | 管理员新增一个 bot 账号，终端扫码后接入 |
 | `/logout` | 管理员登出所有 bot 账号，清除本地凭证并停止服务 |
 | 普通文本 | 发送给当前 agent 处理 |

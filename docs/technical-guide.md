@@ -211,6 +211,8 @@ npx pm2 start "npm run dev" --name wechat-agents
 | `/status` | 显示当前 agent 类型、工作目录、会话信息 |
 | `/help` | 显示帮助信息 |
 | `/cwd <path>` | 修改工作目录；不带参数则显示当前目录 |
+| `/compact` | 调用当前 agent 的内置 compact 命令压缩当前会话上下文 |
+| `/ccusage` | 调用本机 `ccusage` 查看 Claude Code 使用量日报 |
 | 直接发文字 | 发送给当前 agent 处理 |
 
 ### 4.2 典型使用流程

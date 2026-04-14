@@ -16,17 +16,29 @@ import { chunkText } from "./chunker.js";
 import { createStreamingSender } from "./streaming-sender.js";
 import { logger } from "../util/logger.js";
 import { redactUserId } from "../util/redact.js";
+import { getClaudeUsageReport } from "../util/ccusage.js";
 import { buildConversationKey, type AgentType, type AppConfig } from "../types.js";
 
 const TYPING_INTERVAL_MS = 10_000;
 const STREAM_FLUSH_INTERVAL_MS = 2_000;
 const STREAM_FLUSH_CHARS = 300;
 
+class AgentRunTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Agent run timed out after ${timeoutMs}ms.`);
+    this.name = "AgentRunTimeoutError";
+  }
+}
+
 export interface DispatcherDeps {
   config: AppConfig;
   onLogout?: () => Promise<void>;
   onLogin?: () => Promise<{ accountId: string }>;
   listAccounts?: () => string[];
+}
+
+interface AgentPromptOptions {
+  emptyResultText?: string;
 }
 
 export function createDispatcher(deps: DispatcherDeps) {
@@ -93,6 +105,12 @@ export function createDispatcher(deps: DispatcherDeps) {
       case "/cwd":
         await handleCwd(accountId, apiOpts, userId, conversationKey, trimmed.slice(4).trim());
         return;
+      case "/compact":
+        await handleCompact(accountId, apiOpts, userId, conversationKey, typingTicket);
+        return;
+      case "/ccusage":
+        await handleCcusage(accountId, apiOpts, userId);
+        return;
       case "/login":
         await handleLogin(accountId, apiOpts, userId);
         return;
@@ -101,10 +119,23 @@ export function createDispatcher(deps: DispatcherDeps) {
         return;
     }
 
-    // Route to agent
+    await runAgentPrompt(accountId, apiOpts, userId, conversationKey, typingTicket, trimmed);
+  };
+
+  async function runAgentPrompt(
+    accountId: string,
+    apiOpts: WeixinApiOptions,
+    userId: string,
+    conversationKey: string,
+    typingTicket: string,
+    prompt: string,
+    options?: AgentPromptOptions,
+  ): Promise<void> {
     const session = getOrCreateSession(conversationKey, config.defaultAgent, config.codex.workingDirectory);
     const agentType = ensureSessionAgentAvailable(conversationKey, userId, session);
+    const agent = getAgent(agentType);
     let streamedText = "";
+    let runTimedOut = false;
     const sender = createStreamingSender({
       send: (text) => sendChunkSafely(accountId, apiOpts, userId, text),
       flushIntervalMs: STREAM_FLUSH_INTERVAL_MS,
@@ -112,48 +143,78 @@ export function createDispatcher(deps: DispatcherDeps) {
       maxChunkLen: config.textChunkLimit,
     });
 
-    // Start typing indicator
     const typingController = new AbortController();
     startTypingLoop(apiOpts, userId, typingTicket, typingController.signal);
 
     try {
-      const agent = getAgent(agentType);
-      const result = await agent.run({
+      const resultPromise = agent.run({
         userId: conversationKey,
-        prompt: trimmed,
+        prompt,
         cwd: session.cwd,
         onTextDelta: async (text) => {
-          if (!text) return;
+          if (!text || runTimedOut) return;
           streamedText += text;
           await sender.push(text);
         },
       });
+      void resultPromise.then(
+        () => {
+          if (runTimedOut) {
+            logger.warn(
+              `Agent run completed after timeout for user=${redactUserId(userId)} agent=${agentType}`,
+            );
+          }
+        },
+        (err) => {
+          if (runTimedOut) {
+            logger.warn(
+              `Agent run rejected after timeout for user=${redactUserId(userId)} agent=${agentType} err=${String(err)}`,
+            );
+          }
+        },
+      );
+
+      const result = await withAgentRunTimeout(resultPromise, config.agent.runTimeoutMs, () => {
+        runTimedOut = true;
+        logger.error(
+          `Agent run timed out for user=${redactUserId(userId)} agent=${agentType} timeoutMs=${config.agent.runTimeoutMs}`,
+        );
+      });
 
       typingController.abort();
+
+      const finalText = resolveAgentResultText(result.text, options?.emptyResultText);
 
       if (streamedText) {
         await sender.finish(buildStreamingFinalTail(
           userId,
-          result.text,
+          finalText,
           streamedText,
           result.toolsUsed,
           result.isError,
         ));
       } else {
-        const response = formatResponse(result.text, result.toolsUsed, result.isError);
+        const response = formatResponse(finalText, result.toolsUsed, result.isError);
         const plainText = markdownToPlainText(response);
         const chunks = chunkText(plainText, config.textChunkLimit);
         await sendChunks(accountId, apiOpts, userId, chunks);
       }
     } catch (err) {
       typingController.abort();
+      if (err instanceof AgentRunTimeoutError) {
+        if (streamedText) {
+          await sender.finish();
+        }
+        await sendReply(accountId, apiOpts, userId, `Error: ${err.message}`);
+        return;
+      }
       logger.error(`Agent error for user=${redactUserId(userId)}: ${String(err)}`);
       if (streamedText) {
         await sender.finish();
       }
       await sendReply(accountId, apiOpts, userId, `Error: ${String(err)}`);
     }
-  };
+  }
 
   async function handleSwitch(
     accountId: string,
@@ -369,6 +430,8 @@ export function createDispatcher(deps: DispatcherDeps) {
       "  /status - Show current status",
       "  /help - Show this help",
       "  /cwd <path> - Change working directory",
+      "  /compact - Run the current agent's built-in compact command",
+      "  /ccusage - Show local Claude usage report",
       loginHelp,
       logoutHelp,
       "",
@@ -392,6 +455,39 @@ export function createDispatcher(deps: DispatcherDeps) {
     } else {
       updateSession(conversationKey, { cwd: newCwd });
       await sendReply(accountId, apiOpts, userId, `Working directory changed to: ${newCwd}`);
+    }
+  }
+
+  async function handleCompact(
+    accountId: string,
+    apiOpts: WeixinApiOptions,
+    userId: string,
+    conversationKey: string,
+    typingTicket: string,
+  ): Promise<void> {
+    const session = getOrCreateSession(conversationKey, config.defaultAgent, config.codex.workingDirectory);
+    const agentType = ensureSessionAgentAvailable(conversationKey, userId, session);
+    await runAgentPrompt(
+      accountId,
+      apiOpts,
+      userId,
+      conversationKey,
+      typingTicket,
+      "/compact",
+      { emptyResultText: `Current ${agentType} session compacted.` },
+    );
+  }
+
+  async function handleCcusage(
+    accountId: string,
+    apiOpts: WeixinApiOptions,
+    userId: string,
+  ): Promise<void> {
+    try {
+      const report = await getClaudeUsageReport();
+      await sendReply(accountId, apiOpts, userId, report);
+    } catch (err) {
+      await sendReply(accountId, apiOpts, userId, `Failed to run ccusage: ${String(err)}`);
     }
   }
 
@@ -607,6 +703,43 @@ export function createDispatcher(deps: DispatcherDeps) {
 
     return resolvedAgentType;
   }
+}
+
+function resolveAgentResultText(text: string, emptyResultText?: string): string {
+  if (!emptyResultText) {
+    return text;
+  }
+
+  const trimmed = text.trim();
+  if (!trimmed || trimmed === "(No response)") {
+    return emptyResultText;
+  }
+
+  return text;
+}
+
+function withAgentRunTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      onTimeout();
+      reject(new AgentRunTimeoutError(timeoutMs));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
 }
 
 function extractText(msg: WeixinMessage): string {

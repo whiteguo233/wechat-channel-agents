@@ -1,5 +1,8 @@
 {
   "defaultAgent": "claude",
+  "agent": {
+    "runTimeoutMs": 600000
+  },
   "wechat": {
     "baseUrl": "https://ilinkai.weixin.qq.com",
     "routeTag": null,

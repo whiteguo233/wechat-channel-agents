@@ -13,6 +13,9 @@ function resolvePath(p: string): string {
 
 interface FileConfig {
   defaultAgent?: string;
+  agent?: {
+    runTimeoutMs?: number;
+  };
   wechat?: {
     baseUrl?: string;
     routeTag?: string | null;
@@ -54,6 +57,9 @@ export function loadConfig(): AppConfig {
 
   const config: AppConfig = {
     defaultAgent: (fileConfig.defaultAgent as AppConfig["defaultAgent"]) || "claude",
+    agent: {
+      runTimeoutMs: fileConfig.agent?.runTimeoutMs ?? 600_000,
+    },
     wechat: {
       baseUrl: fileConfig.wechat?.baseUrl || "https://ilinkai.weixin.qq.com",
       routeTag: fileConfig.wechat?.routeTag ?? null,
